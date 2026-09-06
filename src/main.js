@@ -945,7 +945,11 @@ class AdminApp {
       animateFlyingName(app, assignment);
       this.playSound(assignment.group);
       await this.sendState().catch(() => setConnectionStatus(app, "offline"));
-      await wait(reducedMotion.matches ? 20 : Math.max(170, step - 260));
+      await wait(
+        reducedMotion.matches
+          ? 20
+          : Math.max(this.fastMode ? 170 : 620, step - 260),
+      );
     }
 
     this.mutate((state) => {
