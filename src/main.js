@@ -276,7 +276,7 @@ function renderGroups(container, state, lastClientId = "") {
     if (!group.members.length) {
       const empty = document.createElement("span");
       empty.className = "team-empty";
-      empty.textContent = "아직 두근두근 대기 중";
+      empty.textContent = "아직 배정 전이에요";
       members.append(empty);
     } else {
       for (const member of group.members) {
@@ -493,7 +493,7 @@ class AdminApp {
           <section class="intro" id="admin-intro">
             <div>
               <p class="eyebrow">LIVE TEAM DRAW</p>
-              <h1>QR로 모이고,<br><em>두근두근</em> 조를 뽑아요.</h1>
+              <h1>모이면 바로,<br><em>랜덤</em> 조 편성.</h1>
             </div>
             <p class="intro-copy">참가자가 이름을 보내면 이 화면에 바로 도착해요. 조 수를 정하고 시작하면 한 명씩 쏙쏙 배정됩니다.</p>
           </section>
