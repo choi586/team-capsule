@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#f7f0df" />
+    <meta
+      name="description"
+      content="QR로 이름을 모으고, 균등하게 랜덤 조를 편성하는 실시간 추첨 도구"
+    />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src https://ntfy.sh wss://ntfy.sh; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'; worker-src 'self' blob:"
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="ko_KR" />
+    <meta property="og:title" content="조이! — QR 랜덤 조 편성" />
+    <meta
+      property="og:description"
+      content="QR로 모이고, 두근두근 조를 뽑아요."
+    />
+    <meta property="og:url" content="https://choi586.github.io/team-capsule/" />
+    <meta property="og:image" content="https://choi586.github.io/team-capsule/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="조이! — QR 랜덤 조 편성" />
+    <meta
+      name="twitter:description"
+      content="QR로 모이고, 두근두근 조를 뽑아요."
+    />
+    <meta name="twitter:image" content="https://choi586.github.io/team-capsule/og.png" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="./site.webmanifest" />
+    <title>조이! — QR 랜덤 조 편성</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">본문으로 바로가기</a>
+    <div id="app"></div>
+    <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="dialog-title">
+      <form method="dialog">
+        <div class="dialog-sticker" aria-hidden="true">!</div>
+        <h2 id="dialog-title"></h2>
+        <p id="dialog-message"></p>
+        <div class="dialog-actions">
+          <button class="button button-ghost" value="cancel">취소</button>
+          <button id="dialog-confirm" class="button button-primary" value="confirm">확인</button>
+        </div>
+      </form>
+    </dialog>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

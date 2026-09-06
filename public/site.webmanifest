@@ -1,0 +1,17 @@
+{
+  "name": "조이! QR 랜덤 조 편성",
+  "short_name": "조이!",
+  "description": "QR로 이름을 모으고 균등하게 랜덤 조를 편성합니다.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f7f0df",
+  "theme_color": "#f7f0df",
+  "icons": [
+    {
+      "src": "./favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
