@@ -36,11 +36,10 @@ const received = withTimeout(
   "게시한 메시지 수신 시간 초과",
 );
 
-const response = await fetch(`https://ntfy.sh/${topic}`, {
+const response = await fetch(`https://ntfy.sh/${topic}?firebase=no`, {
   method: "POST",
   headers: {
     "Content-Type": "text/plain;charset=UTF-8",
-    "X-Firebase": "no",
   },
   body: payload,
 });

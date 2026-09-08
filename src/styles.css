@@ -157,9 +157,16 @@ summary:focus-visible {
   background: #b0adad;
 }
 
-.connection-pill[data-status="online"] .connection-dot {
+.connection-pill[data-status="online"] .connection-dot,
+.connection-pill[data-status="ready"] .connection-dot,
+.connection-pill[data-status="sent"] .connection-dot {
   background: #24aa76;
   box-shadow: 0 0 0 4px rgb(36 170 118 / 16%);
+}
+
+.connection-pill[data-status="sending"] .connection-dot {
+  background: var(--yellow);
+  animation: blink 1.2s ease-in-out infinite;
 }
 
 .connection-pill[data-status="offline"] .connection-dot {

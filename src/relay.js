@@ -5,15 +5,26 @@ export class RoomRelay extends EventTarget {
     super();
     this.topic = topic;
     this.baseUrl = (options.baseUrl ?? DEFAULT_RELAY).replace(/\/$/u, "");
+    this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    this.WebSocketImpl = options.WebSocketImpl ?? globalThis.WebSocket;
     this.socket = null;
     this.closed = false;
     this.reconnectAttempt = 0;
     this.reconnectTimer = null;
     this.retryFloor = 0;
+    this.lastMessageId = "";
+    this.seenMessageIds = new Set();
+    this.maxReconnectAttempts = options.maxReconnectAttempts ?? Number.POSITIVE_INFINITY;
+    this.reconnectBaseMs = options.reconnectBaseMs ?? 750;
+    this.reconnectMaxMs = options.reconnectMaxMs ?? 10_000;
   }
 
   get isOpen() {
-    return this.socket?.readyState === WebSocket.OPEN;
+    return this.socket?.readyState === (this.WebSocketImpl?.OPEN ?? 1);
+  }
+
+  get retryAfterMs() {
+    return this.retryFloor;
   }
 
   connect() {
@@ -39,11 +50,11 @@ export class RoomRelay extends EventTarget {
     const controller = new AbortController();
     const timeout = globalThis.setTimeout(() => controller.abort(), 6_000);
     try {
-      const response = await fetch(`${this.baseUrl}/${encodeURIComponent(this.topic)}`, {
+      const publishUrl = `${this.baseUrl}/${encodeURIComponent(this.topic)}?firebase=no`;
+      const response = await this.fetchImpl(publishUrl, {
         method: "POST",
         headers: {
           "Content-Type": "text/plain;charset=UTF-8",
-          "X-Firebase": "no",
         },
         body: message,
         mode: "cors",
@@ -51,15 +62,19 @@ export class RoomRelay extends EventTarget {
       });
       if (!response.ok) {
         if (response.status === 429) {
-          const retryAfter = Number(response.headers.get("Retry-After"));
-          this.retryFloor = Number.isFinite(retryAfter) ? retryAfter * 1_000 : 5_000;
+          const retryAfterHeader = response.headers.get("Retry-After");
+          const retryAfter = Number(retryAfterHeader);
+          this.retryFloor =
+            retryAfterHeader && Number.isFinite(retryAfter) && retryAfter > 0
+              ? retryAfter * 1_000
+              : 5_000;
         }
-        throw new Error(`메시지를 보내지 못했어요. (${response.status})`);
+        const error = new Error(`메시지를 보내지 못했어요. (${response.status})`);
+        error.status = response.status;
+        error.retryAfterMs = this.retryFloor;
+        throw error;
       }
-    } catch (error) {
-      this.dispatchEvent(new CustomEvent("status", { detail: "offline" }));
-      this.socket?.close();
-      throw error;
+      this.retryFloor = 0;
     } finally {
       globalThis.clearTimeout(timeout);
     }
@@ -68,21 +83,25 @@ export class RoomRelay extends EventTarget {
   close() {
     this.closed = true;
     globalThis.clearTimeout(this.reconnectTimer);
-    this.socket?.close(1000, "room closed");
+    const socket = this.socket;
+    this.socket = null;
+    socket?.close(1000, "room closed");
   }
 
   #openSocket() {
     if (this.closed) return;
-    this.socket?.close();
+    const previous = this.socket;
+    this.socket = null;
+    previous?.close();
     const socketBase = this.baseUrl.replace(/^http/u, "ws");
-    const url = `${socketBase}/${encodeURIComponent(this.topic)}/ws?since=latest`;
-    const socket = new WebSocket(url);
+    const since = this.lastMessageId || "latest";
+    const url = `${socketBase}/${encodeURIComponent(this.topic)}/ws?since=${encodeURIComponent(since)}`;
+    const socket = new this.WebSocketImpl(url);
     this.socket = socket;
     this.dispatchEvent(new CustomEvent("status", { detail: "connecting" }));
 
     socket.addEventListener("open", () => {
       this.reconnectAttempt = 0;
-      this.retryFloor = 0;
       this.dispatchEvent(new CustomEvent("status", { detail: "online" }));
     });
 
@@ -90,6 +109,14 @@ export class RoomRelay extends EventTarget {
       try {
         const packet = JSON.parse(event.data);
         if (packet.event === "message" && typeof packet.message === "string") {
+          if (typeof packet.id === "string") {
+            if (this.seenMessageIds.has(packet.id)) return;
+            this.lastMessageId = packet.id;
+            this.seenMessageIds.add(packet.id);
+            if (this.seenMessageIds.size > 256) {
+              this.seenMessageIds.delete(this.seenMessageIds.values().next().value);
+            }
+          }
           this.dispatchEvent(new CustomEvent("message", { detail: packet.message }));
         }
       } catch {
@@ -97,18 +124,23 @@ export class RoomRelay extends EventTarget {
       }
     });
 
-    socket.addEventListener("close", () => this.#scheduleReconnect());
+    socket.addEventListener("close", () => {
+      if (this.socket === socket) this.#scheduleReconnect();
+    });
     socket.addEventListener("error", () => {
-      this.dispatchEvent(new CustomEvent("status", { detail: "offline" }));
+      if (this.socket === socket) {
+        this.dispatchEvent(new CustomEvent("status", { detail: "offline" }));
+      }
     });
   }
 
   #scheduleReconnect() {
     if (this.closed) return;
     this.dispatchEvent(new CustomEvent("status", { detail: "offline" }));
-    const delay = Math.max(
-      this.retryFloor,
-      Math.min(10_000, 750 * 2 ** this.reconnectAttempt),
+    if (this.reconnectAttempt >= this.maxReconnectAttempts) return;
+    const delay = Math.min(
+      this.reconnectMaxMs,
+      this.reconnectBaseMs * 2 ** this.reconnectAttempt,
     );
     this.reconnectAttempt += 1;
     globalThis.clearTimeout(this.reconnectTimer);

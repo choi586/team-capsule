@@ -16,14 +16,10 @@ import {
   createJoinHash,
   createRoomCredentials,
   importRoomKey,
-  importSigningPrivateKey,
-  importSigningPublicKey,
   openMessage,
   parseJoinHash,
   randomToken,
   sealMessage,
-  signPayload,
-  verifyPayload,
 } from "./crypto.js";
 import { RoomRelay, roomTopic } from "./relay.js";
 
@@ -166,6 +162,9 @@ function setConnectionStatus(root, status) {
     connecting: "연결 중",
     online: "연결됨",
     offline: "다시 연결 중",
+    ready: "전송 준비",
+    sending: "전송 중",
+    sent: "전송 완료",
   };
   pill.dataset.status = status;
   text.textContent = labels[status] ?? labels.connecting;
@@ -429,8 +428,6 @@ class AdminApp {
     this.fullAssignments = session.fullAssignments;
     this.relay = new RoomRelay(roomTopic(this.credentials.roomId));
     this.roomKey = null;
-    this.privateKey = null;
-    this.broadcastTimer = null;
     this.isDrawing = false;
     this.skipRequested = false;
     this.fastMode = false;
@@ -440,10 +437,7 @@ class AdminApp {
   }
 
   async init() {
-    [this.roomKey, this.privateKey] = await Promise.all([
-      importRoomKey(this.credentials.roomKey),
-      importSigningPrivateKey(this.credentials.signingPrivateJwk),
-    ]);
+    this.roomKey = await importRoomKey(this.credentials.roomKey);
     this.renderShell();
     this.bindEvents();
     this.render();
@@ -451,11 +445,6 @@ class AdminApp {
 
     this.relay.addEventListener("status", (event) => {
       setConnectionStatus(app, event.detail);
-      if (event.detail === "online") {
-        this.sendState().catch(() => {
-          setConnectionStatus(app, "offline");
-        });
-      }
     });
     this.relay.addEventListener("message", (event) => this.handleRelayMessage(event.detail));
     this.relay.connect().catch(() => {
@@ -594,7 +583,7 @@ class AdminApp {
         </main>
 
         <footer class="footer">
-          <p class="privacy-note"><strong>잠깐 쓰고 사라지는 방이에요.</strong> 이름과 결과는 암호화되어 전달되며, 관리자 기기에 최대 12시간 동안 복구용으로 남습니다. 수업이 끝나면 ‘새 방’을 눌러 지울 수 있어요.</p>
+          <p class="privacy-note"><strong>잠깐 쓰고 사라지는 방이에요.</strong> 이름은 암호화되어 전달되며, 명단과 결과는 관리자 기기에 최대 12시간 동안 복구용으로 남습니다. 수업이 끝나면 ‘새 방’을 눌러 지울 수 있어요.</p>
           <span class="mini-badge">최대 ${MAX_PARTICIPANTS}명</span>
         </footer>
       </div>`;
@@ -766,7 +755,6 @@ class AdminApp {
     this.mutate((state) => {
       state.groupCount = next;
     });
-    this.scheduleState();
   }
 
   addManualName() {
@@ -796,7 +784,6 @@ class AdminApp {
     });
     input.value = "";
     error.textContent = "";
-    this.scheduleState();
   }
 
   removeParticipant(clientId) {
@@ -804,41 +791,6 @@ class AdminApp {
     this.mutate((state) => {
       state.participants = state.participants.filter((person) => person.clientId !== clientId);
     });
-    this.scheduleState();
-  }
-
-  scheduleState(delay = 420) {
-    globalThis.clearTimeout(this.broadcastTimer);
-    this.broadcastTimer = globalThis.setTimeout(() => {
-      this.sendState().catch(() => setConnectionStatus(app, "offline"));
-    }, delay);
-  }
-
-  async sendAdminMessage(type, data) {
-    const body = createMessage(type, this.credentials.roomId, "admin", data);
-    const signature = await signPayload(body, this.privateKey);
-    const envelope = await sealMessage({ b: body, s: signature }, this.roomKey, this.credentials.roomId);
-    if (envelope.length > MAX_ENVELOPE_SIZE) {
-      throw new Error("메시지가 너무 커서 보낼 수 없어요.");
-    }
-    await this.relay.publish(envelope);
-  }
-
-  sendState() {
-    if (!this.relay.isOpen) return Promise.resolve(false);
-    return this.sendAdminMessage("state", packState(this.state)).then(() => true);
-  }
-
-  async rejectRequest(body, message) {
-    try {
-      await this.sendAdminMessage("reject", {
-        to: body.s,
-        request: body.m,
-        message,
-      });
-    } catch {
-      setConnectionStatus(app, "offline");
-    }
   }
 
   async handleRelayMessage(envelope) {
@@ -847,10 +799,6 @@ class AdminApp {
       const packet = await openMessage(envelope, this.roomKey, this.credentials.roomId);
       if (packet?.s || !validMessage(packet?.b, this.credentials.roomId)) return;
       const body = packet.b;
-      if (body.t === "sync") {
-        this.scheduleState(260);
-        return;
-      }
       if (body.t !== "join") return;
       await this.acceptJoin(body);
     } catch {
@@ -860,17 +808,10 @@ class AdminApp {
 
   async acceptJoin(body) {
     const checked = validateName(body.d?.name);
-    if (!checked.ok) {
-      await this.rejectRequest(body, checked.message);
-      return;
-    }
-    if (this.state.phase !== ROOM_PHASES.OPEN) {
-      await this.rejectRequest(body, "명단이 이미 확정됐어요.");
-      return;
-    }
+    if (!checked.ok || this.state.phase !== ROOM_PHASES.OPEN) return;
     const existing = this.state.participants.find((person) => person.clientId === body.s);
     if (!existing && this.state.participants.length >= MAX_PARTICIPANTS) {
-      await this.rejectRequest(body, "참가 인원이 모두 찼어요.");
+      toast(`참가 인원이 ${MAX_PARTICIPANTS}명으로 모두 찼어요.`, "error");
       return;
     }
     const duplicate = this.state.participants.find(
@@ -879,14 +820,11 @@ class AdminApp {
         canonicalName(person.name) === canonicalName(checked.name),
     );
     if (duplicate) {
-      await this.rejectRequest(body, "같은 이름이 있어요. 성이나 별명을 덧붙여 주세요.");
+      toast(`“${checked.name}” 이름이 이미 있어요. 별명을 덧붙여 달라고 안내해 주세요.`, "error");
       return;
     }
 
-    if (existing?.name === checked.name) {
-      this.scheduleState(180);
-      return;
-    }
+    if (existing?.name === checked.name) return;
     this.mutate((state) => {
       if (existing) {
         existing.name = checked.name;
@@ -894,7 +832,6 @@ class AdminApp {
         state.participants.push({ clientId: body.s, name: checked.name, manual: false });
       }
     });
-    this.scheduleState();
   }
 
   async startDraw() {
@@ -915,7 +852,6 @@ class AdminApp {
       state.roundId = randomToken(8);
     });
     this.skipRequested = false;
-    await this.sendState().catch(() => setConnectionStatus(app, "offline"));
     await wait(reducedMotion.matches ? 40 : 360);
     this.runDraw();
   }
@@ -944,7 +880,6 @@ class AdminApp {
       updateStage(app, this.state, assignment, false);
       animateFlyingName(app, assignment);
       this.playSound(assignment.group);
-      await this.sendState().catch(() => setConnectionStatus(app, "offline"));
       await wait(
         reducedMotion.matches
           ? 20
@@ -956,7 +891,6 @@ class AdminApp {
       state.phase = ROOM_PHASES.COMPLETE;
       state.revealed = this.fullAssignments.map((assignment) => ({ ...assignment }));
     });
-    await this.sendState().catch(() => setConnectionStatus(app, "offline"));
     this.isDrawing = false;
     this.skipRequested = false;
     showConfetti();
@@ -992,7 +926,6 @@ class AdminApp {
     });
     this.lastRenderedId = "";
     this.skipRequested = false;
-    await this.sendState().catch(() => setConnectionStatus(app, "offline"));
     await wait(reducedMotion.matches ? 30 : 300);
     this.runDraw();
   }
@@ -1009,7 +942,6 @@ class AdminApp {
       this.mutate((state) => {
         state.phase = ROOM_PHASES.CLOSED;
       });
-      await this.sendState().catch(() => {});
     }
     this.relay.close();
     localStorage.removeItem(ADMIN_STORAGE_KEY);
@@ -1023,14 +955,10 @@ class ParticipantApp {
     this.clientId = this.loadClientId();
     this.relay = new RoomRelay(roomTopic(config.roomId));
     this.roomKey = null;
-    this.publicKey = null;
-    this.state = null;
-    this.status = "connecting";
+    this.status = "ready";
     this.pending = null;
-    this.retryTimer = null;
+    this.submittedName = this.loadSubmittedName();
     this.editing = false;
-    this.lastRevealCount = 0;
-    this.celebratedRound = "";
   }
 
   loadClientId() {
@@ -1042,27 +970,23 @@ class ParticipantApp {
     return created;
   }
 
+  loadSubmittedName() {
+    const saved = localStorage.getItem(`joy-team-submitted-${this.config.roomId}`);
+    const checked = validateName(saved ?? "");
+    return checked.ok ? checked.name : "";
+  }
+
+  saveSubmittedName(name) {
+    this.submittedName = name;
+    localStorage.setItem(`joy-team-submitted-${this.config.roomId}`, name);
+  }
+
   async init() {
-    [this.roomKey, this.publicKey] = await Promise.all([
-      importRoomKey(this.config.roomKey),
-      importSigningPublicKey(this.config.signingPublicKey),
-    ]);
+    this.roomKey = await importRoomKey(this.config.roomKey);
     this.renderShell();
     this.bindEvents();
     this.render();
-
-    this.relay.addEventListener("status", (event) => {
-      this.status = event.detail;
-      setConnectionStatus(app, event.detail);
-      this.renderConnectionDependentState();
-      if (event.detail === "online") this.sendSync();
-    });
-    this.relay.addEventListener("message", (event) => this.handleRelayMessage(event.detail));
-    this.relay.connect().catch(() => {
-      this.status = "offline";
-      setConnectionStatus(app, "offline");
-      this.renderConnectionDependentState();
-    });
+    setConnectionStatus(app, "ready");
   }
 
   renderShell() {
@@ -1086,7 +1010,7 @@ class ParticipantApp {
           <section class="participant-hero" id="participant-hero">
             <p class="eyebrow">WELCOME TO THE DRAW</p>
             <h1>내 이름을 넣고<br><em>조이!</em> 하세요.</h1>
-            <p class="participant-lead">이름 하나면 준비 끝. 관리자가 시작하면 배정 순간을 여기서 함께 볼 수 있어요.</p>
+            <p class="participant-lead">이름을 보내면 관리자 화면에 바로 도착해요. 전송 후에는 이 화면을 닫아도 됩니다.</p>
           </section>
 
           <section class="card join-card" id="join-card" aria-labelledby="join-title">
@@ -1094,7 +1018,7 @@ class ParticipantApp {
               <div>
                 <p class="step-label">YOUR NAME</p>
                 <h2 id="join-title">추첨에 참가할 이름</h2>
-                <p id="join-count">관리자와 연결하고 있어요.</p>
+                <p id="join-count">한 번만 전송하므로 여러 명이 동시에 참여해도 괜찮아요.</p>
               </div>
               <span class="count-pill" id="participant-count-pill">— / ${MAX_PARTICIPANTS}명</span>
             </div>
@@ -1110,7 +1034,7 @@ class ParticipantApp {
             <div class="waiting-icon" aria-hidden="true">✓</div>
             <div>
               <h2>참가 완료!</h2>
-              <p id="waiting-copy">관리자가 시작할 때까지 잠시만 기다려 주세요.</p>
+              <p id="waiting-copy">관리자 화면에 이름이 보이는지 확인해 주세요. 이제 이 화면은 닫아도 됩니다.</p>
             </div>
             <span class="submitted-name"><span aria-hidden="true">●</span><strong id="submitted-name"></strong></span>
             <button class="button button-ghost" id="edit-name-button" type="button">이름 수정</button>
@@ -1183,70 +1107,34 @@ class ParticipantApp {
   renderConnectionDependentState() {
     const button = app.querySelector("#join-button");
     if (!button) return;
-    button.disabled = this.status !== "online" || Boolean(this.pending);
+    button.disabled = Boolean(this.pending);
     if (this.pending) button.textContent = "이름 보내는 중…";
-    else if (this.status !== "online") button.textContent = "연결을 기다리는 중…";
     else button.textContent = this.findSelf() ? "이 이름으로 수정" : "이 이름으로 참가";
   }
 
   findSelf() {
-    return this.state?.participants.find((person) => person.clientId === this.clientId) ?? null;
-  }
-
-  findOwnAssignment() {
-    return this.state?.revealed.find((person) => person.clientId === this.clientId) ?? null;
+    if (!this.submittedName) return null;
+    return { clientId: this.clientId, name: this.submittedName };
   }
 
   render() {
-    const state = this.state;
     const self = this.findSelf();
-    const phase = state?.phase ?? ROOM_PHASES.OPEN;
-    const isOpen = phase === ROOM_PHASES.OPEN;
-    const isDrawing = phase === ROOM_PHASES.DRAWING;
-    const isComplete = phase === ROOM_PHASES.COMPLETE;
-    const isClosed = phase === ROOM_PHASES.CLOSED;
+    app.querySelector("#participant-hero").hidden = false;
+    app.querySelector("#join-card").hidden = Boolean(self) && !this.editing;
+    app.querySelector("#waiting-card").hidden = !self || this.editing;
+    app.querySelector("#participant-draw").hidden = true;
+    app.querySelector("#personal-result").hidden = true;
+    app.querySelector("#complete-groups").hidden = true;
+    app.querySelector("#closed-card").hidden = true;
 
-    app.querySelector("#participant-hero").hidden = isDrawing || isComplete || isClosed;
-    app.querySelector("#join-card").hidden = !isOpen || (Boolean(self) && !this.editing);
-    app.querySelector("#waiting-card").hidden = !isOpen || !self || this.editing;
-    app.querySelector("#participant-draw").hidden = !isDrawing;
-    app.querySelector("#personal-result").hidden = !isComplete;
-    app.querySelector("#complete-groups").hidden = !isComplete;
-    app.querySelector("#closed-card").hidden = !isClosed;
-
-    const count = state?.participants.length;
-    app.querySelector("#participant-count-pill").textContent =
-      count === undefined ? `— / ${MAX_PARTICIPANTS}명` : `${count} / ${MAX_PARTICIPANTS}명`;
+    app.querySelector("#participant-count-pill").textContent = `최대 ${MAX_PARTICIPANTS}명`;
     app.querySelector("#join-count").textContent =
-      count === undefined
-        ? "관리자와 연결하고 있어요."
-        : `지금 ${count}명이 기다리고 있어요.`;
+      "한 번만 전송하므로 여러 명이 동시에 참여해도 괜찮아요.";
 
     if (self) {
       app.querySelector("#submitted-name").textContent = self.name;
-      app.querySelector("#waiting-copy").textContent = `지금 ${count}명이 함께 기다리고 있어요.`;
-    }
-
-    if (isDrawing) {
-      const last = state.revealed.at(-1) ?? null;
-      updateStage(app, state, last, false);
-      renderGroups(app.querySelector("#participant-groups"), state, last?.clientId ?? "");
-      const own = this.findOwnAssignment();
-      const alert = app.querySelector("#personal-alert");
-      alert.hidden = !own;
-      if (own) alert.textContent = `🎉 ${own.name}님은 ${own.group}조에 배정됐어요!`;
-    }
-
-    if (isComplete) {
-      const own = this.findOwnAssignment();
-      app.querySelector("#personal-group").textContent = own ? `${own.group}조` : "완료!";
-      app.querySelector("#personal-result-title").textContent = own
-        ? `${own.name}님의 오늘의 조는`
-        : "조 편성이 완료됐어요";
-      app.querySelector("#personal-result-copy").textContent = own
-        ? "아래에서 조원도 함께 확인해 보세요."
-        : "전체 결과를 아래에서 확인할 수 있어요.";
-      renderGroups(app.querySelector("#complete-groups-grid"), state);
+      app.querySelector("#waiting-copy").textContent =
+        "관리자 화면에 이름이 보이는지 확인해 주세요. 이제 이 화면은 닫아도 됩니다.";
     }
 
     this.renderConnectionDependentState();
@@ -1258,26 +1146,19 @@ class ParticipantApp {
     await this.relay.publish(envelope);
   }
 
-  sendSync() {
-    const body = createMessage("sync", this.config.roomId, this.clientId);
-    this.sendClientMessage(body).catch(() => setConnectionStatus(app, "offline"));
-  }
-
   async submitName(rawName) {
     const error = app.querySelector("#join-error");
     const checked = validateName(rawName);
     error.textContent = checked.message;
     if (!checked.ok || this.pending) return;
-    if (this.status !== "online") {
-      error.textContent = "연결을 기다린 뒤 다시 눌러 주세요.";
-      return;
-    }
 
     const body = createMessage("join", this.config.roomId, this.clientId, {
       name: checked.name,
     });
-    this.pending = { body, name: checked.name, attempt: 0 };
+    this.pending = { body, name: checked.name };
     this.editing = true;
+    this.status = "sending";
+    setConnectionStatus(app, "sending");
     this.renderConnectionDependentState();
     await this.tryPendingRequest();
   }
@@ -1287,83 +1168,26 @@ class ParticipantApp {
     const pending = this.pending;
     try {
       await this.sendClientMessage(pending.body);
-    } catch {
-      // A bounded retry below handles short network interruptions.
-    }
-    if (!this.pending || this.pending.body.m !== pending.body.m) return;
-    pending.attempt += 1;
-    if (pending.attempt >= 3) {
+      if (!this.pending || this.pending.body.m !== pending.body.m) return;
+      this.saveSubmittedName(pending.name);
       this.pending = null;
+      this.editing = false;
+      this.status = "sent";
+      this.render();
+      setConnectionStatus(app, "sent");
+      toast("이름을 보냈어요. 관리자 화면에서 확인해 주세요.");
+    } catch (publishError) {
+      if (!this.pending || this.pending.body.m !== pending.body.m) return;
+      this.pending = null;
+      this.status = "ready";
+      setConnectionStatus(app, "ready");
       this.renderConnectionDependentState();
-      app.querySelector("#join-error").textContent =
-        "관리자 응답이 없어요. 잠시 후 다시 시도해 주세요.";
-      return;
+      const retrySeconds = Math.max(1, Math.ceil((publishError.retryAfterMs || 0) / 1_000));
+      error.textContent =
+        publishError.status === 429
+          ? `지금 접속이 몰렸어요. ${retrySeconds}초 뒤 다시 눌러 주세요.`
+          : "이름을 보내지 못했어요. 인터넷 연결을 확인한 뒤 다시 눌러 주세요.";
     }
-    const delay = 3_500 * 2 ** (pending.attempt - 1) + Math.random() * 900;
-    globalThis.clearTimeout(this.retryTimer);
-    this.retryTimer = globalThis.setTimeout(() => this.tryPendingRequest(), delay);
-  }
-
-  async handleRelayMessage(envelope) {
-    if (typeof envelope !== "string" || envelope.length > MAX_ENVELOPE_SIZE) return;
-    try {
-      const packet = await openMessage(envelope, this.roomKey, this.config.roomId);
-      if (!packet?.s || !validMessage(packet?.b, this.config.roomId)) return;
-      const authentic = await verifyPayload(packet.b, packet.s, this.publicKey);
-      if (!authentic) return;
-      if (packet.b.t === "state") this.acceptState(packet.b.d);
-      if (packet.b.t === "reject") this.acceptRejection(packet.b.d);
-    } catch {
-      // Ignore malformed traffic on the public relay topic.
-    }
-  }
-
-  acceptState(wireState) {
-    const next = unpackState(wireState);
-    if (!next || (this.state && next.revision < this.state.revision)) return;
-    const previousRevealCount = this.state?.revealed.length ?? 0;
-    const previousPhase = this.state?.phase;
-    this.state = next;
-
-    if (this.pending) {
-      const person = this.findSelf();
-      if (person && canonicalName(person.name) === canonicalName(this.pending.name)) {
-        globalThis.clearTimeout(this.retryTimer);
-        this.pending = null;
-        this.editing = false;
-        app.querySelector("#join-error").textContent = "";
-        toast("참가 완료! 이름이 도착했어요.");
-      }
-    }
-
-    this.render();
-    if (next.revealed.length > previousRevealCount) {
-      const latest = next.revealed.at(-1);
-      updateStage(app, next, latest, false);
-      animateFlyingName(app, latest);
-      if (latest.clientId === this.clientId) {
-        navigator.vibrate?.([80, 45, 120]);
-      }
-    }
-    if (
-      next.phase === ROOM_PHASES.COMPLETE &&
-      previousPhase !== ROOM_PHASES.COMPLETE &&
-      this.celebratedRound !== next.roundId
-    ) {
-      this.celebratedRound = next.roundId;
-      showConfetti();
-    }
-  }
-
-  acceptRejection(data) {
-    if (!this.pending || data?.to !== this.clientId || data?.request !== this.pending.body.m) {
-      return;
-    }
-    globalThis.clearTimeout(this.retryTimer);
-    this.pending = null;
-    this.renderConnectionDependentState();
-    app.querySelector("#join-error").textContent =
-      typeof data.message === "string" ? data.message : "이름을 등록하지 못했어요.";
   }
 }
 
